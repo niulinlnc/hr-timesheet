@@ -240,7 +240,8 @@ class AccountAnalyticLine(orm.Model):
     _inherit = "account.analytic.line"
 
     _columns = {
-        'task_id': fields.many2one('project.task', 'Task')
+        'task_id': fields.many2one('project.task', 'Task'),
+        'hours': fields.related('unit_amount', type='float'),
     }
 
     def _check_task_project(self, cr, uid, ids):
