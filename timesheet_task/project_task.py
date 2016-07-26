@@ -44,9 +44,9 @@ class ProjectTask(orm.Model):
     def _progress_rate(self, cr, uid, ids, names, arg, context=None):
         """TODO improve code taken for OpenERP"""
         res = {}
-        time_category_id = self.pool.get('ir.model.data').get_object_reference(
+        time_category_id = self.pool['ir.model.data'].get_object_reference(
             cr, uid, 'product', 'uom_categ_wtime')[1]
-        product_ids = self.pool.get('product.product').search(
+        product_ids = self.pool['product.product'].search(
             cr, uid, [('uom_id.category_id', '=', time_category_id)])
         cr.execute("""SELECT task_id, COALESCE(SUM(unit_amount),0)
                         FROM account_analytic_line
