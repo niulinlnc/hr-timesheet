@@ -19,9 +19,9 @@
 #
 ##############################################################################
 
-from openerp.osv import orm, fields
-from openerp import api, SUPERUSER_ID
-from openerp.tools.translate import _
+from openerp import _, api, fields, models
+from openerp.exceptions import Warning as UserError
+from openerp.osv import orm, fields as fieldsv
 
 TASK_WATCHERS = [
     'work_ids',
@@ -37,117 +37,66 @@ TIMESHEET_WATCHERS = [
 ]
 
 
-class ProjectTask(orm.Model):
+class ProjectTask(models.Model):
     _inherit = "project.task"
     _name = "project.task"
 
-    def _progress_rate(self, cr, uid, ids, names, arg, context=None):
-        """TODO improve code taken for OpenERP"""
-        res = {}
-        time_category_id = self.pool['ir.model.data'].get_object_reference(
-            cr, uid, 'product', 'uom_categ_wtime')[1]
-        product_ids = self.pool['product.product'].search(
-            cr, uid, [('uom_id.category_id', '=', time_category_id)])
-        cr.execute("""SELECT task_id, COALESCE(SUM(unit_amount),0)
-                        FROM account_analytic_line
-                      WHERE task_id IN %s AND product_id IN %s
-                      GROUP BY task_id""",
-                   (tuple(ids), tuple(product_ids),))
-        hours = dict(cr.fetchall())
-        for task in self.browse(cr, uid, ids, context=context):
-            res[task.id] = {}
-            res[task.id]['effective_hours'] = hours.get(task.id, 0.0)
-            res[task.id]['total_hours'] = (
-                task.remaining_hours or 0.0) + hours.get(task.id, 0.0)
-            res[task.id]['delay_hours'] = res[task.id][
-                'total_hours'] - task.planned_hours
-            res[task.id]['progress'] = 0.0
-            if (task.remaining_hours + hours.get(task.id, 0.0)):
-                res[task.id]['progress'] = round(
-                    100.0 * hours.get(task.id, 0.0) /
-                    res[task.id]['total_hours'], 2)
-        return res
+    work_ids = fields.One2many(
+        comodel_name='hr.analytic.timesheet',
+        inverse_name='task_id',
+        string='Work done',
+    )
+    effective_hours = fields.Float(
+        compute='_compute_progress_rate',
+        string='Time Spent',
+        help="Computed using the sum of the task work done (timesheet lines "
+             "associated on this task).",
+        store=True,
+    )
+    delay_hours = fields.Float(
+        compute='_compute_progress_rate',
+        string='Deduced Hours',
+        help="Computed as difference between planned hours by the project "
+             "manager and the total hours of the task.",
+        store=True,
+    )
+    total_hours = fields.Float(
+        compute='_compute_progress_rate',
+        string='Total Time',
+        help="Computed as: Time Spent + Remaining Time.",
+        store=True,
+    )
+    progress = fields.Float(
+        compute='_compute_progress_rate',
+        string='Progress',
+        group_operator="avg",
+        help="If the task has a progress of 99.99% you should close the "
+             "task if it's finished or reevaluate the time",
+        store=True,
+    )
+    remaining_hours = fields.Float(
+        compute='_compute_progress_rate',
+        string='Remaining Time',
+        help="Computed as: Planned Hours - Time Spent",
+        store=True,
+    )
 
-    def _store_set_values(self, cr, uid, ids, fields, context=None):
-        # Hack to avoid redefining most of function fields of project.project
-        # model. This is mainly due to the fact that orm _store_set_values use
-        # direct access to database. So when modify a line the
-        # _store_set_values as it uses cursor directly to update tasks
-        # project triggers on task are not called
-
-        res = super(ProjectTask, self)._store_set_values(
-            cr, uid, ids, fields, context=context)
-
-        if context is None:
-            context = {}
-        ctx = context.copy()
-        if 'recursion' in ctx:
-            return res
-        ctx['recursion'] = True
-        for row in self.browse(cr, SUPERUSER_ID, ids, context=ctx):
-            if row.project_id:
-                project = row.project_id
-                project.write({'parent_id': project.parent_id.id})
-        return res
-
-    def _get_analytic_line(self, cr, uid, ids, context=None):
-        result = []
-        for aal in self.pool['account.analytic.line'].browse(
-                cr, uid, ids, context=context):
-            if aal.task_id:
-                result.append(aal.task_id.id)
-        return result
-
-    _columns = {
-        'work_ids': fields.one2many(
-            'hr.analytic.timesheet', 'task_id', 'Work done'),
-        'effective_hours': fields.function(
-            _progress_rate, multi="progress", string='Time Spent',
-            help="Computed using the sum of the task work done (timesheet "
-                 "lines associated on this task).",
-            store={'project.task': (lambda self, cr, uid, ids, c=None: ids,
-                                    TASK_WATCHERS, 20),
-                   'account.analytic.line': (_get_analytic_line,
-                                             TIMESHEET_WATCHERS, 20)}),
-        'delay_hours': fields.function(
-            _progress_rate, multi="progress", string='Deduced Hours',
-            help="Computed as difference between planned hours by the project "
-                 "manager and the total hours of the task.",
-            store={'project.task': (lambda self, cr, uid, ids, c=None: ids,
-                                    TASK_WATCHERS, 20),
-                   'account.analytic.line': (_get_analytic_line,
-                                             TIMESHEET_WATCHERS, 20)}),
-        'total_hours': fields.function(
-            _progress_rate, multi="progress", string='Total Time',
-            help="Computed as: Time Spent + Remaining Time.",
-            store={'project.task': (lambda self, cr, uid, ids, c=None: ids,
-                                    TASK_WATCHERS, 20),
-                   'account.analytic.line': (_get_analytic_line,
-                                             TIMESHEET_WATCHERS, 20)}),
-        'progress': fields.function(
-            _progress_rate, multi="progress", string='Progress', type='float',
-            group_operator="avg",
-            help="If the task has a progress of 99.99% you should close the "
-                 "task if it's finished or reevaluate the time",
-            store={'project.task': (lambda self, cr, uid, ids, c=None: ids,
-                                    TASK_WATCHERS, 20),
-                   'account.analytic.line': (_get_analytic_line,
-                                             TIMESHEET_WATCHERS, 20)})
-    }
-
-    def write(self, cr, uid, ids, vals, context=None):
-        res = super(ProjectTask, self).write(
-            cr, uid, ids, vals, context=context)
-        if vals.get('project_id'):
-            ts_obj = self.pool.get('hr.analytic.timesheet')
-            project_obj = self.pool.get('project.project')
-            project = project_obj.browse(
-                cr, uid, vals['project_id'], context=context)
-            account_id = project.analytic_account_id.id
-            for task in self.browse(cr, uid, ids, context=context):
-                ts_obj.write(cr, uid, [w.id for w in task.work_ids],
-                             {'account_id': account_id}, context=context)
-        return res
+    @api.multi
+    @api.depends('work_ids', 'remaining_hours', 'effective_hours',
+                 'planned_hours',
+                 'work_ids.unit_amount', 'work_ids.product_uom_id',
+                 'work_ids.account_id', 'work_ids.task_id')
+    def _compute_progress_rate(self):
+        for task in self:
+            task.effective_hours = sum(task.work_ids.mapped('unit_amount'))
+            task.remaining_hours = task.planned_hours - task.effective_hours
+            task.total_hours = (
+                task.remaining_hours > 0.0 and
+                task.remaining_hours + task.effective_hours or
+                task.effective_hours)
+            task.delay_hours = task.total_hours - task.planned_hours
+            task.progress = task.total_hours and round(
+                100.0 * task.effective_hours / task.total_hours, 2) or 0.0
 
 
 class HrAnalyticTimesheet(orm.Model):
@@ -234,111 +183,26 @@ class HrAnalyticTimesheet(orm.Model):
         return res
 
     _columns = {
-        'hr_analytic_timesheet_id': fields.function(
+        'hr_analytic_timesheet_id': fieldsv.function(
             _get_dummy_hr_analytic_timesheet_id, string='Related Timeline Id',
             type='boolean')
     }
 
 
-class AccountAnalyticLine(orm.Model):
+class AccountAnalyticLine(models.Model):
     """We add task_id on AA and manage update of linked task indicators"""
     _inherit = "account.analytic.line"
 
-    _columns = {
-        'task_id': fields.many2one('project.task', 'Task'),
-        'hours': fields.related('unit_amount', type='float'),
-    }
+    task_id = fields.Many2one(comodel_name='project.task', string='Task')
+    hours = fields.Float(related='unit_amount')
 
-    def _check_task_project(self, cr, uid, ids):
-        for line in self.browse(cr, uid, ids):
+    @api.multi
+    @api.constrains('task_id', 'account_id')
+    def _check_task_project(self):
+        for line in self:
             if line.task_id and line.account_id:
                 if line.task_id.project_id.analytic_account_id.id != \
                         line.account_id.id:
-                    return False
+                    raise UserError(
+                        _('Error! Task must belong to the project.'))
         return True
-
-    _constraints = [
-        (_check_task_project, _('Error! Task must belong to the project.'),
-         ['task_id', 'account_id']),
-    ]
-
-    def _trigger_projects(self, cr, uid, task_ids, context=None):
-        t_obj = self.pool['project.task']
-        for task in t_obj.browse(cr, SUPERUSER_ID, task_ids, context=context):
-            project = task.project_id
-            project.write({'parent_id': project.parent_id.id})
-        return task_ids
-
-    def _set_remaining_hours_create(self, cr, uid, vals, context=None):
-        if not vals.get('task_id'):
-            return
-        hours = vals.get('unit_amount', 0.0)
-        # We can not do a write else we will have a recursion error
-        cr.execute(
-            'UPDATE project_task '
-            'SET remaining_hours=remaining_hours - %s '
-            'WHERE id=%s', (hours, vals['task_id']))
-        self._trigger_projects(cr, uid, [vals['task_id']], context=context)
-        return vals
-
-    def _set_remaining_hours_write(self, cr, uid, ids, vals, context=None):
-        if isinstance(ids, (int, long)):
-            ids = [ids]
-        for line in self.browse(cr, uid, ids):
-            # in OpenERP if we set a value to nil vals become False
-            old_task_id = line.task_id and line.task_id.id or None
-            # if no task_id in vals we assume it is equal to old
-            new_task_id = vals.get('task_id', old_task_id)
-            # we look if value has changed
-            if (new_task_id != old_task_id) and old_task_id:
-                self._set_remaining_hours_unlink(cr, uid, [line.id], context)
-                if new_task_id:
-                    data = {'task_id': new_task_id,
-                            'to_invoice': vals.get('to_invoice',
-                                                   line.to_invoice.id),
-                            'unit_amount': vals.get('unit_amount',
-                                                    line.unit_amount)}
-                    self._set_remaining_hours_create(cr, uid, data, context)
-                    self._trigger_projects(
-                        cr, uid, list(set([old_task_id, new_task_id])),
-                        context=context)
-                return ids
-            if new_task_id:
-                hours = vals.get('unit_amount', line.unit_amount)
-                old_hours = line.unit_amount if old_task_id else 0.0
-                # We can not do a write else we will have a recursion error
-                cr.execute(
-                    'UPDATE project_task '
-                    'SET remaining_hours=remaining_hours - %s + (%s) '
-                    'WHERE id=%s', (hours, old_hours, new_task_id))
-                self._trigger_projects(cr, uid, [new_task_id], context=context)
-        return ids
-
-    def _set_remaining_hours_unlink(self, cr, uid, ids, context=None):
-        if isinstance(ids, (int, long)):
-            ids = [ids]
-        for line in self.browse(cr, uid, ids):
-            if not line.task_id:
-                continue
-            hours = line.unit_amount or 0.0
-            cr.execute(
-                'UPDATE project_task '
-                'SET remaining_hours=remaining_hours + %s '
-                'WHERE id=%s', (hours, line.task_id.id))
-        return ids
-
-    def create(self, cr, uid, vals, context=None):
-        if vals.get('task_id'):
-            self._set_remaining_hours_create(cr, uid, vals, context)
-        return super(AccountAnalyticLine, self).create(cr, uid, vals,
-                                                       context=context)
-
-    def write(self, cr, uid, ids, vals, context=None):
-        self._set_remaining_hours_write(cr, uid, ids, vals, context=context)
-        return super(AccountAnalyticLine, self).write(cr, uid, ids, vals,
-                                                      context=context)
-
-    def unlink(self, cr, uid, ids, context=None):
-        self._set_remaining_hours_unlink(cr, uid, ids, context)
-        return super(AccountAnalyticLine, self).unlink(cr, uid, ids,
-                                                       context=context)

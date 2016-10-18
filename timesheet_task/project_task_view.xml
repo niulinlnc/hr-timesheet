@@ -36,6 +36,11 @@
                         </form>
                     </field>
                 </xpath>
+                <field name="planned_hours" position="replace">
+                    <field name="planned_hours" widget="float_time"
+                            groups="project.group_time_work_estimation_tasks"/>
+                </field>
+
             </field>
         </record>
     </data>
